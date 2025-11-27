@@ -1,0 +1,10 @@
+asgiref==3.9.1
+Django==4.2
+django-cors-headers==4.7.0
+django-tenants==3.8.0
+djangorestframework==3.16.1
+pillow==11.3.0
+psycopg2-binary==2.9.10
+PyJWT==2.10.1
+python-decouple==3.8
+sqlparse==0.5.3
