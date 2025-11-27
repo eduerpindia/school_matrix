@@ -7,19 +7,29 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DEBUG', default=False, cast=bool)
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '*']
-
-# Multi-tenant DB backend
-DATABASES = {
-    'default': {
-        'ENGINE': 'django_tenants.postgresql_backend',  # ✅ यही रखें
-        'NAME': config('DATABASE_NAME'),
-        'USER': config('DATABASE_USER'),
-        'PASSWORD': config('DATABASE_PASSWORD'),
-        'HOST': config('DATABASE_HOST'),
-        'PORT': config('DATABASE_PORT'),
+ALLOWED_HOSTS = ['*']
+import os
+from decouple import config
+import dj_database_url
+DATABASE_URL = config('DATABASE_URL', default=None)
+if DATABASE_URL:
+    DATABASES = {
+        'default': dj_database_url.parse(DATABASE_URL)
     }
-}
+    # For django-tenants
+    DATABASES['default']['ENGINE'] = 'django_tenants.postgresql_backend'
+else:
+    # Multi-tenant DB backend
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django_tenants.postgresql_backend',  # ✅ यही रखें
+            'NAME': config('DATABASE_NAME'),
+            'USER': config('DATABASE_USER'),
+            'PASSWORD': config('DATABASE_PASSWORD'),
+            'HOST': config('DATABASE_HOST'),
+            'PORT': config('DATABASE_PORT'),
+        }
+    }
 
 
 
