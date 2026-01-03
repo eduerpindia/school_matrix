@@ -23,10 +23,11 @@ class LoginAPIView(APIView):
     def post(self, request):
         email = request.data.get('email')
         password = request.data.get('password')
-        
+        tenant_name = request.headers.get("Tenant-Name", None)
         logger.info(f"🔍 Login attempt for email: {email}")
         logger.info(f"🔍 Request tenant: {getattr(request, 'tenant', 'None')}")
         logger.info(f"🔍 Connection schema: {getattr(connection, 'schema_name', 'unknown')}")
+        print("Tenant Name--", tenant_name)
 
         if not email or not password:
             return Response({
@@ -82,7 +83,10 @@ class LoginAPIView(APIView):
                         'id': user.id,
                         'name': user.get_full_name(),
                         'email': user.email,
-                        'user_type': user.user_type
+                        'user_type': user.user_type,
+                        'school_schema':user.school_code,
+                        'school_id':user.school_id
+                        
                     },
                     'tenant': {
                         'id': request.tenant.id,

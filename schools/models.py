@@ -37,3 +37,44 @@ class School(TenantMixin):
 
 class Domain(DomainMixin):
     pass
+
+
+
+class SchoolSession(models.Model):
+    """
+    academic year/session.
+    Example: "2025-26"
+    """
+    school = models.ForeignKey(
+        School,
+        related_name='sessions',
+        on_delete=models.CASCADE
+    )
+    name = models.CharField(max_length=100)  # Example: "2025-26"
+    start_date = models.DateField()
+    end_date = models.DateField()
+    is_current = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-start_date']
+        unique_together = ('school', 'name')
+
+    def __str__(self):
+        return f"{self.school.name} - {self.name}"
+
+    def save(self, *args, **kwargs):
+        if self.is_current:
+            SchoolSession.objects.filter(
+                school=self.school,
+                is_current=True
+            ).exclude(pk=self.pk).update(is_current=False)
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_current_for_school(cls, school):
+        try:
+            return cls.objects.get(school=school, is_current=True)
+        except cls.DoesNotExist:
+            return None

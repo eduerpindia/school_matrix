@@ -1,6 +1,5 @@
 from django.contrib.auth.models import AbstractUser
 from django.db import models
-
 class User(AbstractUser):
     USER_TYPES = [
         ('school_admin', 'School Admin'),
@@ -14,6 +13,10 @@ class User(AbstractUser):
     
     email = models.EmailField(unique=True)
     user_type = models.CharField(max_length=20, choices=USER_TYPES, default='student')
+ 
+    school_id = models.IntegerField(null=True, blank=True, help_text="ID of the school in public schema")
+    school_code = models.CharField(max_length=20, blank=True, null=True, help_text="School code for reference")
+    
     phone = models.CharField(max_length=20, blank=True, null=True)
     date_of_birth = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=1, blank=True, choices=[('M', 'Male'), ('F', 'Female'), ('O', 'Other')])
@@ -24,7 +27,7 @@ class User(AbstractUser):
     profile_picture = models.ImageField(upload_to='profiles/', null=True, blank=True)
 
     USERNAME_FIELD = 'email'
-    REQUIRED_FIELDS = ['username', 'first_name', 'last_name']
+    REQUIRED_FIELDS = ['first_name', 'last_name']
 
     class Meta:
         ordering = ['email']

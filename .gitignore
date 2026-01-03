@@ -22,7 +22,8 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
-
+media/
+.media/
 # OS
 .DS_Store
 Thumbs.db
