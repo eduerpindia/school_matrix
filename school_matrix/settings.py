@@ -9,53 +9,51 @@ SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = ['*']
 import os
-from decouple import config
-import dj_database_url
-DATABASE_URL = config('DATABASE_URL', default=None)
-if DATABASE_URL:
-    DATABASES = {
-        'default': dj_database_url.parse(DATABASE_URL)
-    }
-    # For django-tenants
-    DATABASES['default']['ENGINE'] = 'django_tenants.postgresql_backend'
-else:
-    # Multi-tenant DB backend
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django_tenants.postgresql_backend',  # ✅ यही रखें
-            'NAME': config('DATABASE_NAME'),
-            'USER': config('DATABASE_USER'),
-            'PASSWORD': config('DATABASE_PASSWORD'),
-            'HOST': config('DATABASE_HOST'),
-            'PORT': config('DATABASE_PORT'),
+
+
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django_tenants.postgresql_backend',
+#         'NAME': config('DATABASE_NAME'),
+#         'USER': config('DATABASE_USER'),
+#         'PASSWORD': config('DATABASE_PASSWORD'),
+#         'HOST': config('DATABASE_HOST'),
+#         'PORT': config('DATABASE_PORT'),
+#         'OPTIONS': {                               
+#             'options': '-c search_path=public',
+#         },
+#     }
+# }
+DATABASES = {
+    'default': {
+        'ENGINE': 'django_tenants.postgresql_backend',
+        'NAME': 'backenddb',  # अब यह database exists करता है
+        'USER': 'mysuperuser',
+        'PASSWORD': 'IndiaPro',
+        'HOST': 'backenddb.cr0mquc8kf8q.ap-south-1.rds.amazonaws.com',
+        'PORT': '5432',
+        'OPTIONS': {
+            'sslmode': 'require',  # SSL enable
         }
     }
-
-
+}
 
 # Tenant settings
+PUBLIC_SCHEMA_NAME = 'public'
 TENANT_MODEL = "schools.School"
 TENANT_DOMAIN_MODEL = "schools.Domain"
 
 AUTH_USER_MODEL = "users.User"
 SHARED_APPS = [
-    'django_tenants',  # must be first
-    
-    # Django core apps - IMPORTANT ORDER
+    'django_tenants',  
     'django.contrib.contenttypes',
     'django.contrib.auth',
-    
-    # Your apps - users MUST come before admin
-    'users',  # ✅ FIRST your custom apps
-    'schools',  # ✅ THEN your other apps
-    
-    # Django built-in apps - AFTER your apps
-    'django.contrib.admin',  # ❌ This comes AFTER users
+    'users',
+    'schools',
+    'django.contrib.admin',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-
-    # Third-party apps
     'rest_framework',
     'corsheaders',
 ]
@@ -68,12 +66,8 @@ TENANT_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-
-    # Third-party apps
     'rest_framework',
     'corsheaders',
-
-    # Your tenant apps
     'users',
     'core',
     'students',
@@ -84,6 +78,8 @@ TENANT_APPS = [
     'examinations',
     'library',
     'api',
+    'assignments',
+    'school_dashboard'
 ]
 
 INSTALLED_APPS = list(SHARED_APPS) + [app for app in TENANT_APPS if app not in SHARED_APPS]
@@ -143,7 +139,7 @@ CORS_ALLOW_CREDENTIALS = True
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'Asia/Kolkata'
 USE_I18N = True
-USE_TZ = True
+USE_TZ = False
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
@@ -151,6 +147,16 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+STUDENT_DOCUMENT_FILE_LOCATION = 'students/documents/'
+
+
+
+
+
+
+
+
 
 # Logging configuration
 LOGGING = {

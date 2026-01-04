@@ -1,335 +1,1053 @@
+# teachers/views.py
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from django.shortcuts import get_object_or_404
-from django.db.models import Q
-from django.utils import timezone
-from datetime import datetime, timedelta
+from django.db.models import Q, Count, Prefetch
+from django.db import transaction
+from datetime import datetime, date
 
 from .models import Teacher, TeacherSubject, TeacherAttendance, TeacherSalary
+from classes.models import Class, Section, Subject, ClassSubject, TimeTable
+from schools.models import SchoolSession
 from .serializers import (
-    TeacherSerializer, TeacherCreateSerializer, TeacherDetailSerializer,
-    TeacherSubjectSerializer, TeacherAttendanceSerializer, TeacherSalarySerializer
+    TeacherListSerializer,
+    TeacherDetailSerializer,
+    TeacherCreateSerializer,
+    TeacherUpdateSerializer,
+    SubjectAssignmentSerializer,
+    TeacherSubjectSerializer,
+    TimetableAssignmentSerializer,
+    TimeTableSerializer,
+    TeacherAttendanceSerializer,
+    TeacherSalarySerializer,
 )
 from core.custom_permission import TeachersModulePermission
+from core.models import Module, Permission
 
-# Teacher Views
-class TeacherListCreateAPIView(APIView):
+# ========================================
+# TEACHER CRUD APIS
+# ========================================
+
+class TeacherListAPIView(APIView):
+    """
+    GET: List all teachers with filters
+    
+    URL: /api/teachers/
+    
+    Query Params:
+    - search: Search by name, email, employee_id
+    - is_active: Filter by active status (true/false)
+    - employment_type: Filter by employment type (PERMANENT, CONTRACT, etc.)
+    - is_class_teacher: Filter class teachers (true/false)
+    - qualification: Filter by qualification
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20)
+    """
     permission_classes = [IsAuthenticated, TeachersModulePermission]
     
     def get(self, request):
-        search = request.query_params.get('search', '')
-        employment_type = request.query_params.get('employment_type', '')
-        is_active = request.query_params.get('is_active', 'true')
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied',
+                'message': 'Only school admin or principal can view teachers'
+            }, status=status.HTTP_403_FORBIDDEN)
         
-        queryset = Teacher.objects.all()
+        # Get query parameters
+        search = request.GET.get('search', '').strip()
+        is_active = request.GET.get('is_active')
+        employment_type = request.GET.get('employment_type')
+        is_class_teacher = request.GET.get('is_class_teacher')
+        qualification = request.GET.get('qualification')
+        page = int(request.GET.get('page', 1))
+        page_size = int(request.GET.get('page_size', 20))
         
+        # Base queryset
+        queryset = Teacher.objects.select_related('user').prefetch_related(
+            'subjects__subject',
+            'taught_subjects__class_obj',
+            'taught_subjects__section',
+            'classes_as_class_teacher'
+        ).all()
+        
+        # Apply filters
         if search:
             queryset = queryset.filter(
                 Q(user__first_name__icontains=search) |
                 Q(user__last_name__icontains=search) |
+                Q(user__email__icontains=search) |
                 Q(employee_id__icontains=search) |
-                Q(user__email__icontains=search)
+                Q(phone__icontains=search)
             )
         
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+        
         if employment_type:
-            queryset = queryset.filter(employment_type=employment_type)
+            queryset = queryset.filter(employment_type=employment_type.upper())
         
-        if is_active.lower() == 'true':
-            queryset = queryset.filter(is_active=True)
-        elif is_active.lower() == 'false':
-            queryset = queryset.filter(is_active=False)
+        if is_class_teacher is not None:
+            queryset = queryset.filter(is_class_teacher=is_class_teacher.lower() == 'true')
         
-        serializer = TeacherSerializer(queryset, many=True)
-        return Response(serializer.data)
+        if qualification:
+            queryset = queryset.filter(qualification__icontains=qualification)
+        
+        # Order by
+        queryset = queryset.order_by('-created_at')
+        
+        # Count total
+        total_count = queryset.count()
+        
+        # Pagination
+        start = (page - 1) * page_size
+        end = start + page_size
+        teachers = queryset[start:end]
+        
+        # Serialize
+        serializer = TeacherListSerializer(teachers, many=True)
+        
+        return Response({
+            'success': True,
+            'count': total_count,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': (total_count + page_size - 1) // page_size,
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class TeacherCreateAPIView(APIView):
+    """
+    POST: Create new teacher
+    
+    URL: /api/teachers/create/
+    
+    Body:
+    {
+        "email": "teacher@example.com",
+        "first_name": "John",
+        "last_name": "Doe",
+        "phone": "9876543210",
+        "password": "optional",
+        "employee_id": "EMP001",
+        "date_of_birth": "1990-05-15",
+        "gender": "M",
+        "blood_group": "O+",
+        "address": "123 Main St",
+        "city": "Mumbai",
+        "state": "Maharashtra",
+        "pincode": "400001",
+        "emergency_contact": "9876543211",
+        "qualification": "M.Ed",
+        "specialization": "Mathematics",
+        "experience_years": 5,
+        "date_of_joining": "2023-06-01",
+        "employment_type": "PERMANENT",
+        "is_class_teacher": false,
+        "is_active": true,
+        "assign_teacher_role": true,
+        "modules": ["students", "attendance", "classes"]
+    }
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
     
     def post(self, request):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied',
+                'message': 'Only school admin or principal can create teachers'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Validate data
         serializer = TeacherCreateSerializer(data=request.data)
-        if serializer.is_valid():
+        
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'error': 'Validation error',
+                'details': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            # Create teacher
             teacher = serializer.save()
-            response_serializer = TeacherSerializer(teacher)
-            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Return detailed response
+            detail_serializer = TeacherDetailSerializer(teacher)
+            
+            return Response({
+                'success': True,
+                'message': f'Teacher created successfully with Employee ID: {teacher.employee_id}',
+                'data': detail_serializer.data
+            }, status=status.HTTP_201_CREATED)
+        
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': 'Failed to create teacher',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class TeacherDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    """
+    GET: Get teacher detail by ID
     
-    def get_object(self, pk):
-        return get_object_or_404(Teacher, pk=pk)
+    URL: /api/teachers/<id>/
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
     
     def get(self, request, pk):
-        teacher = self.get_object(pk)
+        try:
+            teacher = Teacher.objects.select_related('user').prefetch_related(
+                'subjects__subject',
+                'taught_subjects__class_obj',
+                'taught_subjects__section',
+                'taught_subjects__subject',
+                'classes_as_class_teacher'
+            ).get(pk=pk)
+        except Teacher.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Teacher not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
         serializer = TeacherDetailSerializer(teacher)
-        return Response(serializer.data)
-    
-    def put(self, request, pk):
-        teacher = self.get_object(pk)
-        serializer = TeacherSerializer(teacher, data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    def delete(self, request, pk):
-        teacher = self.get_object(pk)
-        teacher.is_active = False
-        teacher.save()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        
+        return Response({
+            'success': True,
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
 
-# Teacher Subject Views
-class TeacherSubjectListCreateAPIView(APIView):
+
+class TeacherUpdateAPIView(APIView):
+    """
+    PUT/PATCH: Update teacher information
+    
+    URL: /api/teachers/<id>/update/
+    
+    Body: (all fields optional for PATCH)
+    {
+        "first_name": "John",
+        "last_name": "Doe",
+        "phone": "9876543210",
+        "address": "New Address",
+        "qualification": "M.Ed, PhD",
+        "experience_years": 6,
+        "is_active": true
+    }
+    """
     permission_classes = [IsAuthenticated, TeachersModulePermission]
     
-    def get(self, request):
-        teacher_id = request.query_params.get('teacher_id')
-        subject_id = request.query_params.get('subject_id')
-        academic_year = request.query_params.get('academic_year')
+    def put(self, request, pk):
+        return self._update(request, pk, partial=False)
+    
+    def patch(self, request, pk):
+        return self._update(request, pk, partial=True)
+    
+    def _update(self, request, pk, partial=False):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
         
-        queryset = TeacherSubject.objects.all()
+        try:
+            teacher = Teacher.objects.get(pk=pk)
+        except Teacher.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Teacher not found'
+            }, status=status.HTTP_404_NOT_FOUND)
         
-        if teacher_id:
-            queryset = queryset.filter(teacher_id=teacher_id)
-        if subject_id:
-            queryset = queryset.filter(subject_id=subject_id)
+        # Validate and update
+        serializer = TeacherUpdateSerializer(
+            teacher,
+            data=request.data,
+            partial=partial
+        )
+        
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'error': 'Validation error',
+                'details': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            teacher = serializer.save()
+            
+            # Return updated data
+            detail_serializer = TeacherDetailSerializer(teacher)
+            
+            return Response({
+                'success': True,
+                'message': 'Teacher updated successfully',
+                'data': detail_serializer.data
+            }, status=status.HTTP_200_OK)
+        
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': 'Failed to update teacher',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class TeacherActivateDeactivateAPIView(APIView):
+    """
+    POST: Activate or deactivate teacher
+    
+    URL: /api/teachers/<id>/toggle-status/
+    
+    Body:
+    {
+        "is_active": true/false
+    }
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def post(self, request, pk):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            teacher = Teacher.objects.get(pk=pk)
+        except Teacher.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Teacher not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        is_active = request.data.get('is_active')
+        
+        if is_active is None:
+            return Response({
+                'success': False,
+                'error': 'is_active field is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        teacher.is_active = is_active
+        teacher.user.is_active = is_active
+        
+        teacher.save()
+        teacher.user.save()
+        
+        action = 'activated' if is_active else 'deactivated'
+        
+        return Response({
+            'success': True,
+            'message': f'Teacher {action} successfully',
+            'data': {
+                'id': teacher.id,
+                'employee_id': teacher.employee_id,
+                'name': teacher.user.get_full_name(),
+                'is_active': teacher.is_active
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class TeacherDeleteAPIView(APIView):
+    """
+    DELETE: Delete teacher (soft delete by default)
+    
+    URL: /api/teachers/<id>/delete/
+    
+    Query Params:
+    - hard_delete: true/false (default: false)
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def delete(self, request, pk):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            teacher = Teacher.objects.get(pk=pk)
+        except Teacher.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Teacher not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        hard_delete = request.GET.get('hard_delete', 'false').lower() == 'true'
+        
+        employee_id = teacher.employee_id
+        name = teacher.user.get_full_name()
+        
+        if hard_delete:
+            # Hard delete - permanently remove
+            teacher.user.delete()  # Cascade will delete teacher
+            message = f'Teacher {name} ({employee_id}) permanently deleted'
+        else:
+            # Soft delete - just deactivate
+            teacher.is_active = False
+            teacher.user.is_active = False
+            teacher.save()
+            teacher.user.save()
+            message = f'Teacher {name} ({employee_id}) deactivated'
+        
+        return Response({
+            'success': True,
+            'message': message
+        }, status=status.HTTP_200_OK)
+
+
+# ========================================
+# SUBJECT ASSIGNMENT APIS
+# ========================================
+
+class AssignSubjectsToTeacherAPIView(APIView):
+    """
+    POST: Assign subjects to teacher
+    
+    URL: /api/teachers/assign-subjects/
+    
+    Body:
+    {
+        "teacher_id": 1,
+        "subject_ids": [1, 2, 3],
+        "class_ids": [5, 6],  // Optional
+        "academic_year": "2024-2025"  // Optional, defaults to current
+    }
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def post(self, request):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        serializer = SubjectAssignmentSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'error': 'Validation error',
+                'details': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            assignments = serializer.save()
+            
+            response_serializer = TeacherSubjectSerializer(assignments, many=True)
+            
+            return Response({
+                'success': True,
+                'message': f'{len(assignments)} subject(s) assigned successfully',
+                'data': response_serializer.data
+            }, status=status.HTTP_201_CREATED)
+        
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': 'Failed to assign subjects',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RemoveSubjectFromTeacherAPIView(APIView):
+    """
+    DELETE: Remove subject from teacher
+    
+    URL: /api/teachers/remove-subject/<teacher_subject_id>/
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def delete(self, request, pk):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            teacher_subject = TeacherSubject.objects.get(pk=pk)
+        except TeacherSubject.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Subject assignment not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        teacher_name = teacher_subject.teacher.user.get_full_name()
+        subject_name = teacher_subject.subject.name
+        
+        teacher_subject.delete()
+        
+        return Response({
+            'success': True,
+            'message': f'Subject {subject_name} removed from {teacher_name}'
+        }, status=status.HTTP_200_OK)
+
+
+class TeacherSubjectsListAPIView(APIView):
+    """
+    GET: Get all subjects assigned to a teacher
+    
+    URL: /api/teachers/<teacher_id>/subjects/
+    
+    Query Params:
+    - academic_year: Filter by academic year
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def get(self, request, teacher_id):
+        try:
+            teacher = Teacher.objects.get(pk=teacher_id)
+        except Teacher.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Teacher not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        academic_year = request.GET.get('academic_year')
+        
+        queryset = TeacherSubject.objects.filter(
+            teacher=teacher,
+            subject__is_active=True
+        ).select_related('subject')
+        
         if academic_year:
             queryset = queryset.filter(academic_year=academic_year)
         
         serializer = TeacherSubjectSerializer(queryset, many=True)
-        return Response(serializer.data)
+        
+        return Response({
+            'success': True,
+            'count': queryset.count(),
+            'teacher': {
+                'id': teacher.id,
+                'name': teacher.user.get_full_name(),
+                'employee_id': teacher.employee_id
+            },
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+# ========================================
+# TIMETABLE ASSIGNMENT APIS
+# ========================================
+
+class AssignTimetableToTeacherAPIView(APIView):
+    """
+    POST: Assign timetable period to teacher
+    
+    URL: /api/teachers/assign-timetable/
+    
+    Body:
+    {
+        "class_id": 5,
+        "section_id": 1,
+        "subject_id": 3,
+        "teacher_id": 2,
+        "day": "MON",
+        "period": 1,
+        "start_time": "09:00:00",
+        "end_time": "09:45:00",
+        "room_number": "101"
+    }
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
     
     def post(self, request):
-        serializer = TeacherSubjectSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        serializer = TimetableAssignmentSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'error': 'Validation error',
+                'details': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            timetable = serializer.save()
+            
+            response_serializer = TimeTableSerializer(timetable)
+            
+            return Response({
+                'success': True,
+                'message': 'Timetable period assigned successfully',
+                'data': response_serializer.data
+            }, status=status.HTTP_201_CREATED)
+        
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': 'Failed to assign timetable',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-class TeacherSubjectDetailAPIView(APIView):
+
+class UpdateTimetableAPIView(APIView):
+    """
+    PUT/PATCH: Update timetable entry
+    
+    URL: /api/teachers/timetable/<id>/update/
+    """
     permission_classes = [IsAuthenticated, TeachersModulePermission]
-    
-    def get_object(self, pk):
-        return get_object_or_404(TeacherSubject, pk=pk)
-    
-    def get(self, request, pk):
-        teacher_subject = self.get_object(pk)
-        serializer = TeacherSubjectSerializer(teacher_subject)
-        return Response(serializer.data)
     
     def put(self, request, pk):
-        teacher_subject = self.get_object(pk)
-        serializer = TeacherSubjectSerializer(teacher_subject, data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return self._update(request, pk, partial=False)
     
-    def delete(self, request, pk):
-        teacher_subject = self.get_object(pk)
-        teacher_subject.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-# Teacher Attendance Views
-class TeacherAttendanceListCreateAPIView(APIView):
-    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    def patch(self, request, pk):
+        return self._update(request, pk, partial=True)
     
-    def get(self, request):
-        teacher_id = request.query_params.get('teacher_id')
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
-        month = request.query_params.get('month')  # Format: 2024-03
+    def _update(self, request, pk, partial=False):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
         
-        queryset = TeacherAttendance.objects.all()
+        try:
+            timetable = TimeTable.objects.get(pk=pk)
+        except TimeTable.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Timetable entry not found'
+            }, status=status.HTTP_404_NOT_FOUND)
         
-        if teacher_id:
-            queryset = queryset.filter(teacher_id=teacher_id)
-        
-        if start_date and end_date:
-            queryset = queryset.filter(date__range=[start_date, end_date])
-        elif month:
-            year, month_num = map(int, month.split('-'))
-            import calendar
-            last_day = calendar.monthrange(year, month_num)[1]
-            start_date = f"{year}-{month_num:02d}-01"
-            end_date = f"{year}-{month_num:02d}-{last_day}"
-            queryset = queryset.filter(date__range=[start_date, end_date])
-        
-        serializer = TeacherAttendanceSerializer(queryset, many=True)
-        return Response(serializer.data)
-    
-    def post(self, request):
-        # Handle bulk attendance
-        if isinstance(request.data, list):
-            serializer = TeacherAttendanceSerializer(data=request.data, many=True)
-        else:
-            serializer = TeacherAttendanceSerializer(data=request.data)
-        
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-class TeacherAttendanceDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, TeachersModulePermission]
-    
-    def get_object(self, pk):
-        return get_object_or_404(TeacherAttendance, pk=pk)
-    
-    def get(self, request, pk):
-        attendance = self.get_object(pk)
-        serializer = TeacherAttendanceSerializer(attendance)
-        return Response(serializer.data)
-    
-    def put(self, request, pk):
-        attendance = self.get_object(pk)
-        serializer = TeacherAttendanceSerializer(attendance, data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    def delete(self, request, pk):
-        attendance = self.get_object(pk)
-        attendance.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-# Teacher Salary Views
-class TeacherSalaryListCreateAPIView(APIView):
-    permission_classes = [IsAuthenticated, TeachersModulePermission]
-    
-    def get(self, request):
-        teacher_id = request.query_params.get('teacher_id')
-        month = request.query_params.get('month')
-        payment_status = request.query_params.get('payment_status')
-        
-        queryset = TeacherSalary.objects.all()
-        
-        if teacher_id:
-            queryset = queryset.filter(teacher_id=teacher_id)
-        if month:
-            queryset = queryset.filter(month=month)
-        if payment_status:
-            queryset = queryset.filter(payment_status=payment_status)
-        
-        serializer = TeacherSalarySerializer(queryset, many=True)
-        return Response(serializer.data)
-    
-    def post(self, request):
-        serializer = TeacherSalarySerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-class TeacherSalaryDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, TeachersModulePermission]
-    
-    def get_object(self, pk):
-        return get_object_or_404(TeacherSalary, pk=pk)
-    
-    def get(self, request, pk):
-        salary = self.get_object(pk)
-        serializer = TeacherSalarySerializer(salary)
-        return Response(serializer.data)
-    
-    def put(self, request, pk):
-        salary = self.get_object(pk)
-        serializer = TeacherSalarySerializer(salary, data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    def delete(self, request, pk):
-        salary = self.get_object(pk)
-        salary.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-# Dashboard Views
-class TeacherDashboardAPIView(APIView):
-    permission_classes = [IsAuthenticated, TeachersModulePermission]
-    
-    def get(self, request):
-        total_teachers = Teacher.objects.filter(is_active=True).count()
-        present_today = TeacherAttendance.objects.filter(
-            date=timezone.now().date(), 
-            status='P'
-        ).count()
-        
-        # Monthly attendance summary
-        current_month = timezone.now().strftime('%Y-%m')
-        year, month = map(int, current_month.split('-'))
-        import calendar
-        last_day = calendar.monthrange(year, month)[1]
-        start_date = f"{year}-{month:02d}-01"
-        end_date = f"{year}-{month:02d}-{last_day}"
-        
-        monthly_data = TeacherAttendance.objects.filter(
-            date__range=[start_date, end_date]
-        ).values('teacher').annotate(
-            present_count=models.Count('id', filter=models.Q(status='P')),
-            absent_count=models.Count('id', filter=models.Q(status='A'))
+        serializer = TimeTableSerializer(
+            timetable,
+            data=request.data,
+            partial=partial
         )
         
-        return Response({
-            'total_teachers': total_teachers,
-            'present_today': present_today,
-            'monthly_summary': {
-                'month': current_month,
-                'total_working_days': (timezone.now().date() - datetime(year, month, 1).date()).days + 1,
-                'attendance_data': list(monthly_data)
-            }
-        })
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'error': 'Validation error',
+                'details': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            timetable = serializer.save()
+            
+            return Response({
+                'success': True,
+                'message': 'Timetable updated successfully',
+                'data': TimeTableSerializer(timetable).data
+            }, status=status.HTTP_200_OK)
+        
+        except Exception as e:
+            return Response({
+                'success': False,
+                'error': 'Failed to update timetable',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-class TeacherBulkAttendanceAPIView(APIView):
+
+class RemoveTimetableAPIView(APIView):
+    """
+    DELETE: Remove timetable entry
+    
+    URL: /api/teachers/timetable/<id>/delete/
+    """
     permission_classes = [IsAuthenticated, TeachersModulePermission]
     
-    def post(self, request):
-        date = request.data.get('date')
-        attendance_data = request.data.get('attendance', [])
+    def delete(self, request, pk):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
         
-        if not date:
-            return Response({'error': 'Date is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            timetable = TimeTable.objects.get(pk=pk)
+        except TimeTable.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Timetable entry not found'
+            }, status=status.HTTP_404_NOT_FOUND)
         
-        created_count = 0
-        updated_count = 0
-        errors = []
-        
-        for item in attendance_data:
-            teacher_id = item.get('teacher_id')
-            status = item.get('status')
-            check_in = item.get('check_in')
-            check_out = item.get('check_out')
-            remarks = item.get('remarks', '')
-            
-            if not teacher_id or not status:
-                errors.append(f"Missing required fields for teacher: {teacher_id}")
-                continue
-            
-            try:
-                teacher = Teacher.objects.get(id=teacher_id)
-                attendance, created = TeacherAttendance.objects.update_or_create(
-                    teacher=teacher,
-                    date=date,
-                    defaults={
-                        'status': status,
-                        'check_in': check_in,
-                        'check_out': check_out,
-                        'remarks': remarks
-                    }
-                )
-                
-                if created:
-                    created_count += 1
-                else:
-                    updated_count += 1
-                    
-            except Teacher.DoesNotExist:
-                errors.append(f"Teacher with ID {teacher_id} not found")
-            except Exception as e:
-                errors.append(f"Error processing teacher {teacher_id}: {str(e)}")
+        timetable.delete()
         
         return Response({
-            'message': f'Bulk attendance processed: {created_count} created, {updated_count} updated',
-            'errors': errors if errors else None
-        }, status=status.HTTP_200_OK if not errors else status.HTTP_207_MULTI_STATUS)
+            'success': True,
+            'message': 'Timetable entry deleted successfully'
+        }, status=status.HTTP_200_OK)
+
+
+class TeacherTimetableAPIView(APIView):
+    """
+    GET: Get teacher's complete timetable
+    
+    URL: /api/teachers/<teacher_id>/timetable/
+    
+    Query Params:
+    - day: Filter by specific day (MON, TUE, etc.)
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def get(self, request, teacher_id):
+        try:
+            teacher = Teacher.objects.get(pk=teacher_id)
+        except Teacher.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Teacher not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        day = request.GET.get('day')
+        
+        # Get current session
+        try:
+            current_session = SchoolSession.objects.get(is_current=True)
+        except SchoolSession.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'No active session found'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        queryset = TimeTable.objects.filter(
+            teacher=teacher,
+            session=current_session,
+            is_active=True
+        ).select_related(
+            'class_obj',
+            'section',
+            'subject'
+        ).order_by('day', 'period')
+        
+        if day:
+            queryset = queryset.filter(day=day.upper())
+        
+        serializer = TimeTableSerializer(queryset, many=True)
+        
+        # Group by day
+        timetable_by_day = {}
+        for item in serializer.data:
+            day_name = item['day']
+            if day_name not in timetable_by_day:
+                timetable_by_day[day_name] = []
+            timetable_by_day[day_name].append(item)
+        
+        return Response({
+            'success': True,
+            'teacher': {
+                'id': teacher.id,
+                'name': teacher.user.get_full_name(),
+                'employee_id': teacher.employee_id
+            },
+            'session': current_session.name,
+            'total_periods': queryset.count(),
+            'timetable_by_day': timetable_by_day,
+            'all_periods': serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class TeacherTodayClassesAPIView(APIView):
+    """
+    GET: Get teacher's classes for today
+    
+    URL: /api/teachers/<teacher_id>/today-classes/
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def get(self, request, teacher_id):
+        try:
+            teacher = Teacher.objects.get(pk=teacher_id, is_active=True)
+        except Teacher.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Teacher not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get current day
+        days = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
+        today = days[date.today().weekday()]
+        
+        # Get current session
+        try:
+            current_session = SchoolSession.objects.get(is_current=True)
+        except SchoolSession.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'No active session found'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get today's timetable
+        queryset = TimeTable.objects.filter(
+            teacher=teacher,
+            day=today,
+            session=current_session,
+            is_active=True
+        ).select_related(
+            'class_obj',
+            'section',
+            'subject'
+        ).order_by('period')
+        
+        serializer = TimeTableSerializer(queryset, many=True)
+        
+        return Response({
+            'success': True,
+            'teacher': {
+                'id': teacher.id,
+                'name': teacher.user.get_full_name(),
+                'employee_id': teacher.employee_id
+            },
+            'date': date.today(),
+            'day': today,
+            'total_classes': queryset.count(),
+            'classes': serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+# ========================================
+# TEACHER WORKLOAD & REPORTS
+# ========================================
+
+class TeacherWorkloadReportAPIView(APIView):
+    """
+    GET: Get teacher workload report
+    
+    URL: /api/teachers/<teacher_id>/workload/
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def get(self, request, teacher_id):
+        try:
+            teacher = Teacher.objects.get(pk=teacher_id)
+        except Teacher.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Teacher not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get current session
+        try:
+            current_session = SchoolSession.objects.get(is_current=True)
+        except SchoolSession.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'No active session found'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Count subjects
+        total_subjects = teacher.subjects.filter(
+            subject__is_active=True
+        ).values('subject').distinct().count()
+        
+        # Count classes
+        total_classes = teacher.taught_subjects.filter(
+            session=current_session
+        ).values('class_obj', 'section').distinct().count()
+        
+        # Count periods per week
+        periods_per_week = TimeTable.objects.filter(
+            teacher=teacher,
+            session=current_session,
+            is_active=True
+        ).count()
+        
+        # Count periods per day
+        periods_by_day = {}
+        for day_code, day_name in TimeTable.DAY_CHOICES:
+            count = TimeTable.objects.filter(
+                teacher=teacher,
+                day=day_code,
+                session=current_session,
+                is_active=True
+            ).count()
+            periods_by_day[day_name] = count
+        
+        return Response({
+            'success': True,
+            'teacher': {
+                'id': teacher.id,
+                'name': teacher.user.get_full_name(),
+                'employee_id': teacher.employee_id,
+                'is_class_teacher': teacher.is_class_teacher
+            },
+            'workload': {
+                'total_subjects': total_subjects,
+                'total_classes': total_classes,
+                'periods_per_week': periods_per_week,
+                'periods_by_day': periods_by_day
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class AllTeachersWorkloadAPIView(APIView):
+    """
+    GET: Get workload summary for all teachers
+    
+    URL: /api/teachers/workload-summary/
+    """
+    permission_classes = [IsAuthenticated, TeachersModulePermission]
+    
+    def get(self, request):
+        # Check if user is admin
+        if request.user.user_type not in ['school_admin', 'principal']:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get current session
+        try:
+            current_session = SchoolSession.objects.get(is_current=True)
+        except SchoolSession.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'No active session found'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        teachers = Teacher.objects.filter(is_active=True).select_related('user')
+        
+        workload_data = []
+        
+        for teacher in teachers:
+            total_periods = TimeTable.objects.filter(
+                teacher=teacher,
+                session=current_session,
+                is_active=True
+            ).count()
+            
+            total_subjects = teacher.subjects.filter(
+                subject__is_active=True
+            ).values('subject').distinct().count()
+            
+            total_classes = teacher.taught_subjects.filter(
+                session=current_session
+            ).values('class_obj', 'section').distinct().count()
+            
+            workload_data.append({
+                'teacher_id': teacher.id,
+                'employee_id': teacher.employee_id,
+                'name': teacher.user.get_full_name(),
+                'is_class_teacher': teacher.is_class_teacher,
+                'total_subjects': total_subjects,
+                'total_classes': total_classes,
+                'periods_per_week': total_periods
+            })
+        
+        # Sort by periods_per_week descending
+        workload_data.sort(key=lambda x: x['periods_per_week'], reverse=True)
+        
+        return Response({
+            'success': True,
+            'session': current_session.name,
+            'total_teachers': len(workload_data),
+            'data': workload_data
+        }, status=status.HTTP_200_OK)
+
+
+
+
+# Permission
+
+from .serializers import *
+from django.shortcuts import get_object_or_404
+class PermissionModuleListView(APIView):
+    """
+    API 1: Get all modules with their permissions
+    GET /api/permissions/modules/
+    """
+    permission_classes = [TeachersModulePermission]
+    
+    def get(self, request):
+        """List all active modules with permissions"""
+        if not request.user.is_superuser and getattr(request.user, 'user_type', None) != 'school_admin':
+            return Response(
+                {"error": "Only school admins can view modules"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        modules = Module.objects.filter(is_active=True).prefetch_related('permissions')
+        serializer = ModuleSerializer(modules, many=True)
+        return Response(serializer.data)
+
+
+class AssignTeacherPermissionView(APIView):
+    """
+    API 2: Assign permissions to teacher
+    POST /api/permissions/assign/
+    """
+    permission_classes = [TeachersModulePermission]
+    
+    def post(self, request):
+        """Assign permissions to teacher"""
+        if not request.user.is_superuser and getattr(request.user, 'user_type', None) != 'school_admin':
+            return Response(
+                {"error": "Only school admins can assign permissions"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = AssignPermissionSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            result = serializer.save()
+            return Response(result, status=status.HTTP_201_CREATED)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class TeacherPermissionDetailView(APIView):
+    """
+    API 3: Get teacher's permission details
+    GET /api/permissions/teacher/<teacher_id>/
+    """
+    permission_classes = [TeachersModulePermission]
+    
+    def get(self, request, teacher_id):
+        """Get teacher permission details"""
+        if not request.user.is_superuser and getattr(request.user, 'user_type', None) != 'school_admin':
+            return Response(
+                {"error": "Only school admins can view permissions"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        teacher = get_object_or_404(Teacher, id=teacher_id, is_active=True)
+        serializer = TeacherPermissionDetailSerializer(teacher)
+        return Response(serializer.data)
+
+
+class EditTeacherPermissionView(APIView):
+    """
+    API 4: Edit teacher permissions (add/remove)
+    POST /api/permissions/edit/
+    """
+    permission_classes = [TeachersModulePermission]
+    
+    def post(self, request):
+        """Edit teacher permissions"""
+        if not request.user.is_superuser and getattr(request.user, 'user_type', None) != 'school_admin':
+            return Response(
+                {"error": "Only school admins can edit permissions"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = EditPermissionSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            result = serializer.save()
+            return Response(result, status=status.HTTP_200_OK)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

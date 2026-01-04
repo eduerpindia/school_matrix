@@ -1,3 +1,5 @@
+ # core/custom_permission.py
+
 from rest_framework.permissions import BasePermission
 from .permission_utils import has_module
 

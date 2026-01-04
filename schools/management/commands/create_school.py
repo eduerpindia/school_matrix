@@ -1,16 +1,17 @@
+# schools/management/commands/create_school.py
 import secrets
 import string
-from datetime import timedelta
+from datetime import datetime, date, timedelta
 
 from django.core.management.base import BaseCommand, CommandError
 from django.core.management import call_command
-from django.utils import timezone
 from django.db import connection
 from django.contrib.auth import get_user_model
 
 from schools.models import School, Domain
 
-User = get_user_model()  # Use your custom User model
+User = get_user_model()
+
 
 class Command(BaseCommand):
     help = 'Create a new school tenant with module-level RBAC'
@@ -48,13 +49,12 @@ class Command(BaseCommand):
         # Advanced
         parser.add_argument('--skip-validation', action='store_true')
         parser.add_argument('--auto-verify', action='store_true', default=True)
-        parser.add_argument('--create-dummy-data', action='store_true', help='Create dummy students/teachers data')
 
     def handle(self, *args, **options):
         try:
             # Reset to public schema first
             connection.set_schema_to_public()
-            
+
             if not options['skip_validation']:
                 self._validate_inputs(options)
 
@@ -64,31 +64,29 @@ class Command(BaseCommand):
             school = self._create_school(options)
             domain = self._create_domain(school, options['domain'])
 
-            # Migrate tenant schema - Use schema_name
+            # Migrate tenant schema
             self.stdout.write('🔄 Creating tenant schema and running migrations...')
             call_command('migrate_schemas', '--schema', school.schema_name)
 
             # Switch to tenant
             connection.set_tenant(school)
 
-            # Create admin user
-            admin_user, admin_password = self._create_admin_user(options)
+            # ✅ CREATE ADMIN USER WITH SCHOOL FIELDS
+            admin_user, admin_password = self._create_admin_user(school, options)
 
             # Seed module-level RBAC
             modules_count, roles_count = self._seed_modules_and_roles()
 
             # Assign Super Admin role to admin
             self._assign_super_admin(admin_user)
-            
-            # Create dummy data if requested
-            if options['create_dummy_data']:
-                self._create_dummy_data()
 
             # Reset to public schema
             connection.set_schema_to_public()
 
             # Print summary
-            self._print_success(school, domain, admin_user, admin_password, modules_count, roles_count)
+            self._print_success(
+                school, domain, admin_user, admin_password, modules_count, roles_count
+            )
 
         except Exception as e:
             self.stdout.write(self.style.ERROR(f'❌ School creation failed: {e}'))
@@ -100,7 +98,7 @@ class Command(BaseCommand):
 
     def _validate_inputs(self, opts):
         self.stdout.write('🔍 Validating inputs...')
-        
+
         # Check if school code already exists
         if School.objects.filter(school_code=opts['code']).exists():
             raise CommandError(f'School code "{opts["code"]}" already exists')
@@ -125,6 +123,8 @@ class Command(BaseCommand):
         clean_code = opts['code'].lower().replace(' ', '_').replace('-', '_')
         schema_name = f'school_{clean_code}'
 
+        today = date.today()  # IST (since USE_TZ = False and server is IST)
+
         school = School.objects.create(
             name=opts['name'],
             school_code=opts['code'],
@@ -134,19 +134,23 @@ class Command(BaseCommand):
             city=opts['city'],
             state=opts['state'],
             country=opts['country'],
-            postal_code='400001',  # Mumbai postal code
-            establishment_date=timezone.now().date(),
+            postal_code='400001',
+            establishment_date=today,
             board=opts['board'],
             subscription_type=opts['plan'],
-            subscription_start=timezone.now().date(),
-            subscription_end=timezone.now().date() + timedelta(days=opts['validity_days']),
+            subscription_start=today,
+            subscription_end=today + timedelta(days=opts['validity_days']),
             student_capacity=1000,
             academic_year_start_month=4,
             is_active=True,
             is_verified=opts['auto_verify'],
             schema_name=schema_name,
         )
-        self.stdout.write(self.style.SUCCESS(f"✅ School '{school.name}' created (schema: {schema_name})"))
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"✅ School '{school.name}' created (schema: {schema_name})"
+            )
+        )
         return school
 
     def _create_domain(self, school, domain_url):
@@ -154,19 +158,20 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"✅ Domain '{domain_url}' mapped"))
         return domain
 
-    def _create_admin_user(self, opts):
+    def _create_admin_user(self, school, opts):
+        """Create admin user with school reference"""
         pwd = opts.get('admin_password') or self._gen_pwd()
         first, last = self._split_name(opts['admin_name'])
 
         dob = None
         if opts.get('admin_dob'):
             try:
-                dob = timezone.datetime.strptime(opts['admin_dob'], '%Y-%m-%d').date()
+                dob = datetime.strptime(opts['admin_dob'], '%Y-%m-%d').date()
             except ValueError:
                 self.stdout.write(self.style.WARNING('⚠️ Invalid DOB format, skipping'))
 
         admin = User(
-            username=opts['admin_email'],  # Use email as username
+            username=opts['admin_email'],
             email=opts['admin_email'],
             first_name=first,
             last_name=last,
@@ -180,72 +185,22 @@ class Command(BaseCommand):
             is_staff=True,
             is_active=True,
             is_verified=opts['auto_verify'],
+            school_id=school.id,
+            school_code=school.school_code,
         )
         admin.set_password(pwd)
         admin.save()
-        self.stdout.write(self.style.SUCCESS(f"✅ Admin user '{admin.get_full_name()}' created"))
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"✅ Admin user '{admin.get_full_name()}' created"
+            )
+        )
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"   School ID: {school.id}, School Code: {school.school_code}"
+            )
+        )
         return admin, pwd
-
-    # ============ Dummy Data Creation ============
-    
-    def _create_dummy_data(self):
-        self.stdout.write('🔄 Creating dummy data...')
-        
-        # Create some dummy teachers
-        teacher_names = [
-            ('Priya Sharma', 'priya.sharma@school.edu', 'Mathematics'),
-            ('Ravi Kumar', 'ravi.kumar@school.edu', 'Physics'),
-            ('Anjali Patel', 'anjali.patel@school.edu', 'English'),
-            ('Suresh Gupta', 'suresh.gupta@school.edu', 'Chemistry'),
-            ('Meena Singh', 'meena.singh@school.edu', 'Biology'),
-        ]
-        
-        teachers_created = 0
-        for name, email, subject in teacher_names:
-            first, last = self._split_name(name)
-            teacher = User(
-                username=email,
-                email=email,
-                first_name=first,
-                last_name=last,
-                user_type='teacher',
-                phone=f'98765432{teachers_created:02d}',
-                gender='F' if name.split()[0] in ['Priya', 'Anjali', 'Meena'] else 'M',
-                is_active=True,
-                is_verified=True,
-            )
-            teacher.set_password('teacher123')
-            teacher.save()
-            teachers_created += 1
-        
-        # Create some dummy students
-        student_names = [
-            ('Aarav Verma', 'aarav.verma@student.edu', 'Class 10'),
-            ('Diya Jain', 'diya.jain@student.edu', 'Class 10'),
-            ('Arjun Reddy', 'arjun.reddy@student.edu', 'Class 9'),
-            ('Kavya Nair', 'kavya.nair@student.edu', 'Class 9'),
-            ('Rohit Agarwal', 'rohit.agarwal@student.edu', 'Class 8'),
-        ]
-        
-        students_created = 0
-        for name, email, class_name in student_names:
-            first, last = self._split_name(name)
-            student = User(
-                username=email,
-                email=email,
-                first_name=first,
-                last_name=last,
-                user_type='student',
-                phone=f'87654321{students_created:02d}',
-                gender='F' if name.split()[0] in ['Diya', 'Kavya'] else 'M',
-                is_active=True,
-                is_verified=True,
-            )
-            student.set_password('student123')
-            student.save()
-            students_created += 1
-            
-        self.stdout.write(self.style.SUCCESS(f'✅ Created {teachers_created} teachers and {students_created} students'))
 
     # ============ Seeding (Module-level RBAC only) ============
 
@@ -276,7 +231,13 @@ class Command(BaseCommand):
         for name, label, icon, is_core in all_modules:
             m, created = Module.objects.get_or_create(
                 name=name,
-                defaults=dict(display_name=label, icon=icon, is_core=is_core, is_active=True, created_by_system=True)
+                defaults=dict(
+                    display_name=label,
+                    icon=icon,
+                    is_core=is_core,
+                    is_active=True,
+                    created_by_system=True,
+                ),
             )
             if created:
                 modules_created += 1
@@ -298,8 +259,12 @@ class Command(BaseCommand):
                 action='module',
                 defaults=dict(
                     codename=code,
-                    description=('Access to all modules' if code == 'ALL_MODULES' else f'Full access to {code} module')
-                )
+                    description=(
+                        'Access to all modules'
+                        if code == 'ALL_MODULES'
+                        else f'Full access to {code} module'
+                    ),
+                ),
             )
 
         # Create roles and attach module-level permissions
@@ -311,20 +276,37 @@ class Command(BaseCommand):
         # Super Admin
         super_admin, created = Role.objects.get_or_create(
             name='Super Admin',
-            defaults=dict(is_system_role=True, description='Full access to all modules', is_active=True)
+            defaults=dict(
+                is_system_role=True,
+                description='Full access to all modules',
+                is_active=True,
+            ),
         )
         if created:
             roles_created += 1
             super_admin.permissions.set(perms(['ALL_MODULES']))
 
-        # Other roles...
+        # Principal
         principal_modules = [
-            'dashboard', 'students', 'teachers', 'classes', 'attendance',
-            'fees', 'examinations', 'timetable', 'reports', 'library', 'communications'
+            'dashboard',
+            'students',
+            'teachers',
+            'classes',
+            'attendance',
+            'fees',
+            'examinations',
+            'timetable',
+            'reports',
+            'library',
+            'communications',
         ]
         principal, created = Role.objects.get_or_create(
             name='Principal',
-            defaults=dict(is_system_role=True, description='Comprehensive module access', is_active=True)
+            defaults=dict(
+                is_system_role=True,
+                description='Comprehensive module access',
+                is_active=True,
+            ),
         )
         if created:
             roles_created += 1
@@ -334,8 +316,13 @@ class Command(BaseCommand):
 
     def _assign_super_admin(self, user):
         from core.models import Role, UserRole
+
         role = Role.objects.get(name='Super Admin')
-        UserRole.objects.get_or_create(user=user, role=role, defaults={'assigned_by': user, 'is_active': True})
+        UserRole.objects.get_or_create(
+            user=user,
+            role=role,
+            defaults={'assigned_by': user, 'is_active': True},
+        )
         self.stdout.write(self.style.SUCCESS('✅ Super Admin role assigned'))
 
     # ============ Helpers ============
@@ -344,10 +331,14 @@ class Command(BaseCommand):
         chars = string.ascii_letters + string.digits + "!@#$%^&*"
         pwd = ''.join(secrets.choice(chars) for _ in range(12))
         # Ensure complexity
-        if not any(c.islower() for c in pwd): pwd = pwd[:-1] + secrets.choice(string.ascii_lowercase)
-        if not any(c.isupper() for c in pwd): pwd = pwd[:-1] + secrets.choice(string.ascii_uppercase)
-        if not any(c.isdigit() for c in pwd): pwd = pwd[:-1] + secrets.choice(string.digits)
-        if not any(c in "!@#$%^&*" for c in pwd): pwd = pwd[:-1] + secrets.choice("!@#$%^&*")
+        if not any(c.islower() for c in pwd):
+            pwd = pwd[:-1] + secrets.choice(string.ascii_lowercase)
+        if not any(c.isupper() for c in pwd):
+            pwd = pwd[:-1] + secrets.choice(string.ascii_uppercase)
+        if not any(c.isdigit() for c in pwd):
+            pwd = pwd[:-1] + secrets.choice(string.digits)
+        if not any(c in "!@#$%^&*" for c in pwd):
+            pwd = pwd[:-1] + secrets.choice("!@#$%^&*")
         return pwd
 
     def _split_name(self, full_name: str):
@@ -362,7 +353,6 @@ class Command(BaseCommand):
                 f'School: {opts["name"]} ({opts["code"]}) | {opts["domain"]}\n'
                 f'Plan: {opts["plan"].title()} | Validity: {opts["validity_days"]} days\n'
                 f'Admin: {opts["admin_name"]} <{opts["admin_email"]}>\n'
-                f'Dummy Data: {"Yes" if opts["create_dummy_data"] else "No"}\n'
                 f'{"="*60}\n'
             )
         )
@@ -376,17 +366,12 @@ class Command(BaseCommand):
                 f'Domain: {domain.domain} | Schema: {school.schema_name}\n'
                 f'Admin: {admin.get_full_name()} <{admin.email}>\n'
                 f'Password: {pwd}\n'
+                f'Admin School ID: {admin.school_id}\n'
+                f'Admin School Code: {admin.school_code}\n'
                 f'Modules: {modules_count} | Roles: {roles_count}\n\n'
                 f'🌐 Access URLs:\n'
                 f'   • Django Admin: http://{domain.domain}/admin\n'
                 f'   • API Login: http://{domain.domain}/api/v1/auth/login/\n'
-                f'   • Header-Based API: http://localhost:8000/api/v1/auth/login/\n'
-                f'     (Header: Tenant-Name: {school.school_code})\n\n'
-                f'🧪 Test Login:\n'
-                f'   curl -X POST -H "Tenant-Name: {school.school_code}" \\\n'
-                f'        -H "Content-Type: application/json" \\\n'
-                f'        -d \'{{"email": "{admin.email}", "password": "{pwd}"}}\' \\\n'
-                f'        http://localhost:8000/api/v1/auth/login/\n'
                 f'{"="*70}\n'
             )
         )

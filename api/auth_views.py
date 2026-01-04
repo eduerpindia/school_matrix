@@ -17,12 +17,13 @@ User = get_user_model()
 
 @method_decorator(csrf_exempt, name='dispatch')
 class LoginAPIView(APIView):
-    permission_classes = [AllowAny]  # ✅ Allow anyone to access login
-    authentication_classes = []      # ✅ Disable all authentication for login
+    permission_classes = [AllowAny] 
+    authentication_classes = [] 
 
     def post(self, request):
         email = request.data.get('email')
         password = request.data.get('password')
+        tenant_name = request.headers.get("Tenant-Name", None)
         
         logger.info(f"🔍 Login attempt for email: {email}")
         logger.info(f"🔍 Request tenant: {getattr(request, 'tenant', 'None')}")
@@ -35,14 +36,6 @@ class LoginAPIView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            # Debug: Check current schema and available users
-            current_schema = getattr(connection, 'schema_name', 'unknown')
-            user_count = User.objects.count()
-            available_emails = list(User.objects.values_list('email', flat=True)[:5])  # First 5 only
-            
-            logger.info(f"🔍 Schema: {current_schema}, User count: {user_count}")
-            logger.info(f"🔍 Available emails: {available_emails}")
-
             # Use Django's authenticate function
             user = authenticate(request=request, username=email, password=password)
             
@@ -53,23 +46,8 @@ class LoginAPIView(APIView):
                 access_token = create_jwt_token(user, request.tenant)
                 refresh_token = create_refresh_token(user)
 
-                # Get module permissions
+                # Get module permissions (simple list)
                 mods = sorted(list(effective_module_permissions(user)))
-                
-                # Build module access map
-                modules = Module.objects.filter(name__in=mods, is_active=True)
-                modules_access_map = {
-                    m.name: {
-                        'display_name': m.display_name,
-                        'icon': m.icon,
-                        'can_view': True,
-                        'can_add': True,
-                        'can_edit': True,
-                        'can_delete': True,
-                        'can_import': True,
-                        'can_export': True,
-                    } for m in modules
-                }
 
                 return Response({
                     'success': True,
@@ -82,38 +60,29 @@ class LoginAPIView(APIView):
                         'id': user.id,
                         'name': user.get_full_name(),
                         'email': user.email,
-                        'user_type': user.user_type
+                        'user_type': user.user_type,
+                        'school_schema': user.school_code,
+                        'school_id': user.school_id
                     },
                     'tenant': {
                         'id': request.tenant.id,
                         'name': request.tenant.name,
                         'schema': request.tenant.schema_name
                     },
-                    'modules': mods,
-                    'modules_access_map': modules_access_map,
-                    'debug': {
-                        'schema': current_schema,
-                        'user_count': user_count
-                    }
+                    'modules': mods  # ✅ Simple list - frontend can handle icons/permissions
                 }, status=status.HTTP_200_OK)
             else:
                 logger.warning(f"❌ Authentication failed for email: {email}")
                 return Response({
                     'success': False,
-                    'error': 'Invalid email or password',
-                    'debug': {
-                        'available_users': available_emails,
-                        'schema': current_schema,
-                        'tenant': request.tenant.school_code if hasattr(request, 'tenant') else 'none'
-                    }
+                    'error': 'Invalid email or password'
                 }, status=status.HTTP_401_UNAUTHORIZED)
                 
         except Exception as e:
             logger.error(f"❌ Login error: {str(e)}", exc_info=True)
             return Response({
                 'success': False,
-                'error': 'Authentication error',
-                'debug_info': str(e)
+                'error': 'Authentication error'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
