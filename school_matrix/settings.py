@@ -37,46 +37,11 @@ DATABASES = {
         }
     }
 }
-# =================== CORS CONFIGURATION ===================
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:8000",
-    "http://127.0.0.1:8000",
-    "http://52.66.255.28:3000",  # यदि Next.js production में है
-    "https://yourdomain.com",    # यदि custom domain है
-]
 
-# या सभी origins allow करने के लिए (development के लिए)
-# CORS_ALLOW_ALL_ORIGINS = True  # सिर्फ development में use करें
+ALLOWED_HOSTS = ["*", "http://localhost:3000/"]
+CORS_ORIGIN_ALLOW_ALL = True
+CORS_ALLOW_HEADERS = ['*']
 
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS',
-    'PATCH',
-    'POST',
-    'PUT',
-]
-
-CORS_ALLOW_HEADERS = [
-    'accept',
-    'accept-encoding',
-    'authorization',
-    'content-type',
-    'dnt',
-    'origin',
-    'user-agent',
-    'x-csrftoken',
-    'x-requested-with',
-    'tenant-name',  # आपका custom header
-]
-
-CORS_ALLOW_CREDENTIALS = True
-CORS_EXPOSE_HEADERS = ['Content-Type', 'X-CSRFToken']
-# ==========================================================
-
-# Tenant settings
 PUBLIC_SCHEMA_NAME = 'public'
 TENANT_MODEL = "schools.School"
 TENANT_DOMAIN_MODEL = "schools.Domain"
