@@ -38,7 +38,10 @@ DATABASES = {
     }
 }
 
-# Tenant settings
+ALLOWED_HOSTS = ["*", "http://localhost:3000/"]
+CORS_ORIGIN_ALLOW_ALL = True
+CORS_ALLOW_HEADERS = ['*']
+
 PUBLIC_SCHEMA_NAME = 'public'
 TENANT_MODEL = "schools.School"
 TENANT_DOMAIN_MODEL = "schools.Domain"
